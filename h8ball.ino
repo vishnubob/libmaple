@@ -163,23 +163,57 @@ void timer_callback()
 
 void setup() 
 {
-    Serial.begin(9600); 
+    Serial.begin((unsigned long)115200); 
+    /*
     tft.begin();
-
     tft.fillScreen(ILI9340_BLACK);
     tft.setCursor(0, 0);
     tft.setTextColor(ILI9340_WHITE);
     tft.setTextSize(1);
+    */
 
-    Serial.println("Hi!");
-    display_message("Hi!");
-    Timer1.initialize(5000);
-    Timer1.attachInterrupt(timer_callback);
+    //Timer1.initialize(5000);
+    //Timer1.attachInterrupt(timer_callback);
 }
 
-void loop() 
+void _loop() 
 {
     gesture.step();
     if (gesture.shake())
         Serial.println("shake!");
+}
+
+void loop()
+{
+    if (!Serial.available())
+    {
+        return;
+    }
+    unsigned long count;
+    count = Serial.read();
+    count |= (unsigned long)Serial.read() << 8;
+    count |= (unsigned long)Serial.read() << 16;
+    count |= (unsigned long)Serial.read() << 24;
+    capture(count);
+}
+
+void capture(unsigned long count)
+{
+    int data[3];
+    while(count)
+    {
+        cli();
+        for(unsigned char idx = 0; idx < AXIS_COUNT; ++idx)
+        {
+            data[idx] = analogRead(AxisPins[idx]);
+        }
+        sei();
+        for(unsigned char idx = 0; idx < AXIS_COUNT; ++idx)
+        {
+            int val = data[idx];
+            Serial.write(val & 0xFF);
+            Serial.write((val >> 8) & 0xFF);
+        }
+        --count;
+    }
 }
