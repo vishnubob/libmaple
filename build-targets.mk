@@ -1,6 +1,12 @@
 # main project target
-$(BUILD_PATH)/main.o: $(SRCROOT)/main.cpp
-	$(SILENT_CXX) $(CXX) $(CFLAGS) $(CXXFLAGS) $(LIBMAPLE_INCLUDES) $(WIRISH_INCLUDES) -o $@ -c $< 
+$(BUILD_PATH)/h8ball.o: $(SRCROOT)/h8ball.cpp 
+	$(CXX) $(CFLAGS) -I./Adafruit-GFX-Library -I./Adafruit_ILI9340 $(CXXFLAGS) $(LIBMAPLE_INCLUDES) $(WIRISH_INCLUDES) -o $@ -c $< 
+$(SRCROOT)/Adafruit_ILI9340/Adafruit_ILI9340.o: $(SRCROOT)/Adafruit_ILI9340/Adafruit_ILI9340.cpp 
+	$(CXX) $(CFLAGS) -I./Adafruit-GFX-Library -I./Adafruit_ILI9340 $(CXXFLAGS) $(LIBMAPLE_INCLUDES) $(WIRISH_INCLUDES) -o $@ -c $< 
+$(SRCROOT)/Adafruit-GFX-Library/Adafruit_GFX.o: $(SRCROOT)/Adafruit-GFX-Library/Adafruit_GFX.cpp
+	$(CXX) $(CFLAGS) -I./Adafruit-GFX-Library -I./Adafruit_ILI9340 $(CXXFLAGS) $(LIBMAPLE_INCLUDES) $(WIRISH_INCLUDES) -o $@ -c $< 
+
+OBJECTS := $(SRCROOT)/Adafruit_ILI9340/Adafruit_ILI9340.o $(SRCROOT)/Adafruit-GFX-Library/Adafruit_GFX.o $(BUILD_PATH)/h8ball.o 
 
 $(BUILD_PATH)/libmaple.a: $(BUILDDIRS) $(TGT_BIN)
 	- rm -f $@
@@ -8,10 +14,10 @@ $(BUILD_PATH)/libmaple.a: $(BUILDDIRS) $(TGT_BIN)
 
 library: $(BUILD_PATH)/libmaple.a
 
-.PHONY: library
+#.PHONY: library
 
-$(BUILD_PATH)/$(BOARD).elf: $(BUILDDIRS) $(TGT_BIN) $(BUILD_PATH)/main.o
-	$(SILENT_LD) $(CXX) $(LDFLAGS) -o $@ $(TGT_BIN) $(BUILD_PATH)/main.o -Wl,-Map,$(BUILD_PATH)/$(BOARD).map
+$(BUILD_PATH)/$(BOARD).elf: $(BUILDDIRS) $(TGT_BIN) $(OBJECTS)
+	$(CXX) $(LDFLAGS) -o $@ $(TGT_BIN) $(OBJECTS) -Wl,-Map,$(BUILD_PATH)/$(BOARD).map
 
 $(BUILD_PATH)/$(BOARD).bin: $(BUILD_PATH)/$(BOARD).elf
 	$(SILENT_OBJCOPY) $(OBJCOPY) -v -Obinary $(BUILD_PATH)/$(BOARD).elf $@ 1>/dev/null
