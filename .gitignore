@@ -10,3 +10,4 @@ TAGS
 arm
 cscope*
 .gdbinit
+*.o
