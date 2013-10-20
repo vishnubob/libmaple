@@ -59,8 +59,8 @@ class MovingAverage(list):
         steps = (len(self) - window) / step
         res = []
         _pts = [self[widx * step:widx * step + window] for widx in range(steps)]
-        return [quantize(average(data)) for data in _pts]
-        #return [average(data) for data in _pts]
+        #return [quantize(average(data)) for data in _pts]
+        return [average(data) for data in _pts]
 
     def append(self, val):
         super(MovingAverage, self).append(val)
@@ -173,7 +173,10 @@ class GestureSystem(object):
                 import traceback
                 traceback.print_exc()
 
-dev = "/dev/tty.usbmodem411"
+try:
+    dev = sys.argv[1]
+except:
+    dev = "/dev/tty.usbmodem411"
 mcu = serial.Serial(dev, 115200)
 gs = GestureSystem(mcu)
 gs.loop()

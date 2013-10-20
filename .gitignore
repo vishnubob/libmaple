@@ -11,3 +11,4 @@ arm
 cscope*
 .gdbinit
 *.o
+*.bak

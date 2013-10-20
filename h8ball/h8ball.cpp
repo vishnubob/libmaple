@@ -1,3 +1,6 @@
+#include <stdint.h>
+#include "kiss_fftr.h"
+#include "RingBuffer.h"
 #include "SPI.h"
 #include "Adafruit_GFX.h"
 #include "Adafruit_ILI9340.h"
@@ -8,6 +11,8 @@
 __attribute__((constructor)) void premain() {
     init();
 }
+
+unsigned long testFillScreen();
 
 // LCD
 #define DISPLAY_SPI_PORT 2
@@ -33,122 +38,180 @@ int AxisData[3] = {0, 0, 0};
 class Accelerometer
 {
 public:
+    Accelerometer(uint32_t bandwidth, uint32_t overlap=0, uint32_t retain=5) :
+        stepcnt(0), samplecnt(0),
+        _bandwidth(bandwidth), _overlap(overlap), _sampled(false), _retain(retain)
+    {
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
+        {
+            _steps[axis] = new OverwriteRingBuffer<int16_t>(_bandwidth + _overlap + 1);
+            _samples[axis] = new OverwriteRingBuffer<int16_t>(_retain);
+        }
+        // Create the configurations for FFT and iFFT...
+        fftConfiguration = kiss_fftr_alloc(_retain, 0, NULL, NULL);
+    }
+
     void step()
     {
-        int val;
-        for(int idx = 0; idx < AXIS_COUNT; ++idx)
+        _step = (_step + 1) % (_bandwidth - _overlap); 
+        stepcnt += 1;
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
         {
-            val = analogRead(AxisPins[idx]);
-            _delta[idx] += (_last[idx] - val);
-            _last[idx] = val;
+            uint16_t val = analogRead(AxisPins[axis]);
+            _steps[axis]->push_back(val);
+        }
+        if (_step != 0)
+            return;
+        toggleLED();
+        samplecnt += 1;
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
+        {
+            float sum = 0;
+            for(int sidx = 0; sidx < _bandwidth; ++sidx)
+            {
+                sum += _steps[axis]->peek_front(sidx);
+            }
+            uint16_t avg = sum / _bandwidth;
+            _samples[axis]->push_back(avg);
+            _steps[axis]->move_front(_bandwidth - _overlap);
         }
     }
 
-    int get_delta(int idx)
+    void debug_dump()
     {
-        int ret = _delta[idx];
-        _delta[idx] = 0;
-        return ret;
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
+        {
+            SerialUSB.print(AxisLabels[axis]);
+            SerialUSB.print("(steps): ");
+            _steps[axis]->debug_dump();
+            SerialUSB.println("");
+        }
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
+        {
+            SerialUSB.print(AxisLabels[axis]);
+            SerialUSB.print("(samples): ");
+            _samples[axis]->debug_dump();
+            SerialUSB.println("");
+        }
+        SerialUSB.println("");
     }
 
-    unsigned char classify(int threshold)
+    void fft()
     {
-        unsigned char ret = 0;
-        int val;
-
-        val = get_delta(0);
-        if (val > threshold)
+        // Allocate space for the FFT results (frequency bins)...
+        kiss_fft_cpx fftBins[_retain / 2 + 1];
+        int16_t timeDomainData[_retain];
+        for(int axis = 0; axis < AXIS_COUNT; ++axis)
         {
-            ret |= X_POS;
-        } else
-        if (val < -threshold)
-        {
-            ret |= X_NEG;
+            for(int idx = 0; idx < _retain; ++idx)
+            {
+                timeDomainData[idx] = peek_sample(axis, idx);
+            }
+            kiss_fftr(fftConfiguration, const_cast<const int16_t*>(timeDomainData), fftBins);
+            for(int idx = 0; idx < _retain / 2 + 1; ++idx)
+            {
+                SerialUSB.print(idx);
+                SerialUSB.print(" [r:");
+                SerialUSB.print(fftBins[idx].r);
+                SerialUSB.print(" i:");
+                SerialUSB.print(fftBins[idx].i);
+                SerialUSB.print("] ");
+            }
+            SerialUSB.println("");
         }
-
-        val = get_delta(1);
-        if (val > threshold)
-        {
-            ret |= Y_POS;
-        } else
-        if (val < -threshold)
-        {
-            ret |= Y_NEG;
-        }
-
-        val = get_delta(2);
-        if (val > threshold)
-        {
-            ret |= Z_POS;
-        } else
-        if (val < -threshold)
-        {
-            ret |= Z_NEG;
-        }
-        return ret;
+        kiss_fftr_free(fftConfiguration);
     }
 
+    float g_scale(float val)
+    {
+        //return max(-1.0, min(1.0, ((val - 2048.0) / 2048.0) * 3.0));
+        //return ((val / 4096.0 * 6.0) - 3.0) / 3.0;
+        return val / 4096.0;
+    }
+
+    float roll(int8_t x, int8_t y, int8_t z)
+    {
+        return atan2(-y, -z) * 180.0 / M_PI;
+    }
+
+    float pitch(uint8_t x, uint8_t y, uint8_t z)
+    {
+        float gx = x;
+        float gy = y;
+        float gz = z;
+        return atan2(gx, sqrt(gy*gy + gz*gz)) * 180.0 / M_PI;
+    }
+
+    float roll()
+    {
+        int8_t x = peek_sample(0);
+        int8_t y = peek_sample(1);
+        int8_t z = peek_sample(2);
+        return roll(x, y, z);
+    }
+        
+    float pitch()
+    {
+        int8_t x = peek_sample(0);
+        int8_t y = peek_sample(1);
+        int8_t z = peek_sample(2);
+        return pitch(x, y, z);
+    }
+
+
+    int16_t peek_sample(int axis, int offset=0)
+    {
+        return _samples[axis]->peek_front(offset);
+    }
+        
+    int16_t axis_sample(int axis, int samples=1, int offset=0)
+    {
+        if ((samples <= 0) || (samples > _bandwidth))
+        {
+            samples = _bandwidth;
+        }
+        float sum = 0;
+        for(int sidx = offset; sidx < samples; ++sidx)
+        {
+            sum += _samples[axis]->peek_back(sidx);
+        }
+        int16_t avg = sum / (samples - offset);
+        return avg - 2048;
+    }
+
+public:
+    int stepcnt;
+    int samplecnt;
 private:
     volatile int _last[AXIS_COUNT];
     volatile int _delta[AXIS_COUNT];
-    volatile bool _cycle;
+    int _bandwidth;
+    int _overlap;
+    volatile bool _sampled;
+    int _retain;
+    volatile int _step;
+
+    float _vmap[AXIS_COUNT];
+    OverwriteRingBuffer<int16_t>* _steps[AXIS_COUNT];
+    OverwriteRingBuffer<int16_t>* _samples[AXIS_COUNT];
+    kiss_fftr_cfg fftConfiguration;
 };
 
-Accelerometer accel;
+Accelerometer accel(10, 5, 20);
 
 class GestureModel
 {
 public:
-    GestureModel(): _movement(false), _pending(false)
-    {
-        _move_start = millis();
-        _move_end = millis();
-        _hysteresis = 100;
-    }
 
     void step()
     {
-        unsigned info = accel.classify(1);
-        bool movement = (info != 0);
-        unsigned long now = millis();
-        if (movement && !_movement)
-        {
-            // we started to move
-            SerialUSB.println("Move start");
-            _move_start = now;
-            _movement = movement;
-        } else
-        if (!movement && _movement)
-        {
-            // have we sat still long enough?
-            if ((_move_start + _hysteresis) < now)
-            {
-                // we stopped moving
-                _move_end = now;
-                SerialUSB.print("Move end ");
-                SerialUSB.println(now - _move_start);
-                _pending = true;
-                _movement = movement;
-            }
-        }
     }
 
-    bool shake()
+    void shake()
     {
-        if (_pending && !_movement && (_move_end - _move_start) > 500)
-        {
-            _pending = false;
-            return true;
-        }
-        return false;
     }
 
 private:
-    unsigned long _move_start;
-    unsigned long _move_end;
-    unsigned long _hysteresis;
-    bool _movement;
-    bool _pending;
 };
 
 GestureModel gesture;
@@ -163,25 +226,32 @@ void timer_callback()
     accel.step();
 }
 
-void _setup() 
-{
-    /*
-    tft.begin();
-    tft.fillScreen(ILI9340_BLACK);
-    tft.setCursor(0, 0);
-    tft.setTextColor(ILI9340_WHITE);
-    tft.setTextSize(1);
-    */
+// We'll use timer 2
+HardwareTimer sensor_timer(2);
 
-    //Timer1.initialize(5000);
-    //Timer1.attachInterrupt(timer_callback);
-}
-
-void _loop() 
+void setup() 
 {
-    gesture.step();
-    if (gesture.shake())
-        SerialUSB.println("shake!");
+    //while (!SerialUSB.available()) {};
+    for(int axis = 0; axis < AXIS_COUNT; ++axis)
+    {
+        pinMode(AxisPins[axis], INPUT_ANALOG);
+    }
+    pinMode(BOARD_LED_PIN, OUTPUT);
+    // in microseconds; should give 1000Hz toggles
+    int _sensor_rate = 1000; 
+    // Pause the timer while we're configuring it
+    sensor_timer.pause();
+    // Set up period
+    sensor_timer.setPeriod(_sensor_rate); // in microseconds
+    // Set up an interrupt on channel 1
+    sensor_timer.setChannel1Mode(TIMER_OUTPUT_COMPARE);
+    // Interrupt 1 count after each update
+    sensor_timer.setCompare(TIMER_CH1, 1);  
+    sensor_timer.attachCompare1Interrupt(timer_callback);
+    // Refresh the timer's count, prescale, and overflow
+    sensor_timer.refresh();
+    // Start the timer counting
+    sensor_timer.resume();
 }
 
 void capture(unsigned long count)
@@ -203,18 +273,91 @@ void capture(unsigned long count)
     }
 }
 
-void __loop()
+void Prompt(void)
 {
-    if (!SerialUSB.available())
+    static long v = 0;
+    if (!SerialUSB.available()) return;
+    char ch = SerialUSB.read();
+    SerialUSB.println(ch);
+
+    switch(ch) 
     {
-        return;
+        /* numbers / values */
+        case '0'...'9':
+            v = v * 10 + ch - '0';
+            break;
+        case '-':
+            v *= -1;
+            break;
+        case 'z':
+            v = 0;
+            break;
+        case 'p':
+            SerialUSB.print("Sample Count: ");
+            SerialUSB.print(accel.samplecnt);
+            SerialUSB.println("");
+            SerialUSB.print("Step Count: ");
+            SerialUSB.print(accel.stepcnt);
+            SerialUSB.println("");
+            accel.debug_dump();
+            SerialUSB.println("");
+            break;
+        case 'c':
+            unsigned long count;
+            count = SerialUSB.read();
+            count |= (unsigned long)SerialUSB.read() << 8;
+            count |= (unsigned long)SerialUSB.read() << 16;
+            count |= (unsigned long)SerialUSB.read() << 24;
+            capture(count);
+            break;
+        case 'w':
+            // watch
+            while (1)
+            {
+                if (SerialUSB.available())
+                {
+                    SerialUSB.read();
+                    break;
+                }
+                for (int axis=0; axis < AXIS_COUNT; ++axis)
+                {
+                    SerialUSB.print("[");
+                    SerialUSB.print(AxisLabels[axis]);
+                    SerialUSB.print(": ");
+                    //SerialUSB.print(accel.axis_sample(axis, 1));
+                    SerialUSB.print(accel.peek_sample(axis));
+                    SerialUSB.print(", ");
+                    SerialUSB.print(accel.g_scale(accel.peek_sample(axis)));
+                    /*
+                    SerialUSB.print(", ");
+                    SerialUSB.print(analogRead(AxisPins[axis]));
+                    */
+                    SerialUSB.print("] ");
+                }
+                SerialUSB.print(" roll: ");
+                SerialUSB.print(accel.roll());
+                SerialUSB.print(" pitch: ");
+                SerialUSB.print(accel.pitch());
+                SerialUSB.println();
+                accel.fft();
+                delay(100);
+            }
+            break;
+        case 'T':
+            testFillScreen();
+            break;
+        default:
+            SerialUSB.println("wat");
     }
-    unsigned long count;
-    count = SerialUSB.read();
-    count |= (unsigned long)SerialUSB.read() << 8;
-    count |= (unsigned long)SerialUSB.read() << 16;
-    count |= (unsigned long)SerialUSB.read() << 24;
-    capture(count);
+    SerialUSB.println("");
+    SerialUSB.print("v=");
+    SerialUSB.print(v);
+    SerialUSB.print("> ");
+}
+
+void loop()
+{
+    Prompt();
 }
 
 /***************************************************
@@ -233,8 +376,6 @@ void __loop()
   MIT license, all text above must be included in any redistribution
  ****************************************************/
  
-
-
 
 unsigned long testFillScreen() {
   unsigned long start = micros();
@@ -477,7 +618,7 @@ unsigned long testFilledRoundRects() {
   return micros() - start;
 }
 
-void setup() {
+void display_test() {
   SerialUSB.println("Adafruit 2.2\" SPI TFT Test!"); 
  
   tft.begin();
@@ -532,15 +673,6 @@ void setup() {
 
   SerialUSB.println(("Done!"));
 }
-
-void loop(void) {
-  for(uint8_t rotation=0; rotation<4; rotation++) {
-    tft.setRotation(rotation);
-    testText();
-    delay(2000);
-  }
-}
-
 
 int main()
 {
