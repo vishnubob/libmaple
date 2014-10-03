@@ -376,9 +376,9 @@ void Adafruit_GFX::write(uint8_t c) {
   } else {
     drawChar(cursor_x, cursor_y, c, textcolor, textbgcolor, textsize);
     cursor_x += textsize*6;
-    if (wrap && (cursor_x > (_width - textsize*6))) {
+    if (wrap && (cursor_x > (_width -40 - textsize*6))) {
       cursor_y += textsize*8;
-      cursor_x = 0;
+      cursor_x = 40;
     }
   }
 #if ARDUINO >= 100

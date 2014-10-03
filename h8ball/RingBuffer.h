@@ -47,6 +47,22 @@ public:
         return true;
     }
 
+    T* peek_back()
+    {
+        if (is_empty())
+            return NULL;
+        T* ret = const_cast<T*>(_head);
+        return ret;
+    }
+
+    T* peek_front()
+    {
+        if (is_empty())
+            return NULL;
+        T* ret = const_cast<T*>(_tail);
+        return ret;
+    }
+
     T* pop_front()
     {
         if (is_empty())
@@ -109,14 +125,14 @@ public:
         return true;
     }
 
-    T& pop_front()
+    T pop_front()
     {
         if (is_empty())
-            return NULL;
+            return *_buffer;
         _tail += 1;
         if(_tail >= _buffer_end)
             _tail = _buffer;
-        return *_tail;
+        return (*_tail);
     }
 
     T& peek_front(size_t offset=0)

@@ -1,4 +1,7 @@
 #include <stdint.h>
+#include <SdFat.h>
+#include <HardwareSPI.h>
+#include <stdint.h>
 #include "kiss_fftr.h"
 #include "RingBuffer.h"
 #include "SPI.h"
@@ -12,35 +15,298 @@ __attribute__((constructor)) void premain() {
     init();
 }
 
+
+typedef struct shake_rec_t {
+    int axis;
+    float hz;
+    float mag;
+} shake_rec;
+
 unsigned long testFillScreen();
 
+// timeouts
+#define IDLE_TIMEOUT        5000
+#define DISPLAY_TIMEOUT     1000
+
 // LCD
-#define DISPLAY_SPI_PORT 2
-#define _CS 20
-#define _DC 22
-#define _RST 21
-Adafruit_ILI9340 tft = Adafruit_ILI9340(_CS, _DC, _RST, DISPLAY_SPI_PORT);
+#define DISPLAY_SPI_PORT    2
+#define _DC                 18
+#define _RST                17
+#define _SD_CS              16
+#define _LCD_CS             15
+#define _BL                 19
+
+// SPI
+HardwareSPI spi(DISPLAY_SPI_PORT);
+Adafruit_ILI9340 tft = Adafruit_ILI9340(_LCD_CS, _DC, _RST, &spi);
+//Adafruit_ILI9340 tft = Adafruit_ILI9340(_LCD_CS, _DC, _RST, DISPLAY_SPI_PORT);
+Sd2Card card(spi, false);
+SdVolume volume;
+SdFile root;
+SdFile file;
+
 
 // Accel
 #define AXIS_COUNT 3
+#define X_AXIS 0
+#define Y_AXIS 1
+#define Z_AXIS 2
 
-#define X_POS   (1 << 0)
-#define X_NEG   (1 << 1)
-#define Y_POS   (1 << 2)
-#define Y_NEG   (1 << 3)
-#define Z_POS   (1 << 4)
-#define Z_NEG   (1 << 5)
+#define SENSOR_SAMPLE_RATE 1024
 
-const int AxisPins[3] = {10, 9, 8};
+const int AxisPins[3] = {9, 10, 11};
 char AxisLabels[3] = {'X', 'Y', 'Z'};
 int AxisData[3] = {0, 0, 0};
+
+#define TRAILS 10
+OverwriteRingBuffer<int> rb_x(TRAILS);
+OverwriteRingBuffer<int> rb_y(TRAILS);
+
+class Phrases
+{
+public:
+    void init()
+    {
+        //enable();
+        if (!card.init()) SerialUSB.println("card.init failed");
+        if (!volume.init(&card)) SerialUSB.println("volume.init failed");
+        if (!root.openRoot(&volume)) SerialUSB.println("openRoot failed");
+        //disable();
+    }
+
+    void enable() { digitalWrite(_SD_CS, LOW); }
+    void disable() { digitalWrite(_SD_CS, HIGH); }
+
+    void write_count(int32_t count)
+    {
+        //enable();
+        if (!file.open(&root, "count.dat", O_WRITE | O_CREAT | O_TRUNC))
+        {
+            SerialUSB.println("Can't write count.dat");
+        } else
+        {
+            write_int(file, count);
+            file.close();
+        }
+        //disable();
+    }
+
+    int32_t read_count()
+    {
+        int32_t ret = 0;
+        //enable();
+        if (file.open(&root, "count.dat", O_READ))
+        {
+            ret = read_int(file);
+            file.close();
+        }
+        //disable();
+        return ret;
+    }
+
+    void write_index(int32_t index)
+    {
+        //enable();
+        //SerialUSB.print("writing index ");
+        //SerialUSB.println(index);
+        if (!file.open(&root, "index.dat", O_WRITE | O_CREAT | O_APPEND))
+        {
+            SerialUSB.println("Can't write index.dat");
+        } else
+        {
+            write_int(file, index);
+            file.close();
+        }
+        //disable();
+    }
+
+    int32_t read_index(int32_t pos)
+    {
+        int32_t ret = 0;
+        uint32_t offset = pos * sizeof(int32_t);
+        //enable();
+        if (!file.open(&root, "index.dat", O_READ))
+        {
+            SerialUSB.println("Can't read index.dat");
+        } else
+        {
+            file.seekSet(offset);
+            ret = read_int(file);
+            file.close();
+        }
+        //disable();
+        return ret;
+    }
+        
+    void write_phrase(const char* phrase)
+    {
+        //enable();
+        if (!file.open(&root, "phrases.dat", O_WRITE | O_CREAT | O_APPEND))
+        {
+            SerialUSB.println("Can't write phrases.dat");
+        } else
+        {
+            size_t pos = file.fileSize();
+            for(size_t idx = 0; idx < strlen(phrase); ++idx)
+            {
+                file.write(phrase[idx]);
+            }
+            file.write((uint8_t)0);
+            file.close();
+            write_index(pos);
+            write_count(read_count() + 1);
+        }
+        //disable();
+    }
+
+    void read_phrase(int32_t index, char *phrase)
+    {
+        size_t offset = read_index(index);
+        //enable();
+        if (!file.open(&root, "phrases.dat", O_READ))
+        {
+            SerialUSB.println("Can't read phrases.dat");
+        } else
+        {
+            file.seekSet(offset);
+            char *ptr = phrase;
+            while (1)
+            {
+                *ptr = file.read();
+                if (*ptr == 0)
+                {
+                    break;
+                }
+                ptr++;
+            }
+            file.close();
+        }
+        //disable();
+    }
+
+    void reset()
+    {
+        //enable();
+        if (file.open(&root, "phrases.dat", O_WRITE))
+        {
+            file.remove();
+            file.close();
+        }
+        if (file.open(&root, "index.dat", O_WRITE))
+        {
+            file.remove();
+            file.close();
+        }
+        if (file.open(&root, "count.dat", O_WRITE))
+        {
+            file.remove();
+            file.close();
+        }
+        //disable();
+    }
+
+    void get_random_phrase(char *phrase)
+    {
+        randomSeed(analogRead(4));
+        SerialUSB.print("there are ");
+        SerialUSB.print(read_count());
+        SerialUSB.println(" phrases available. ");
+        int32_t idx = random(0, read_count());
+        SerialUSB.print("picked ");
+        SerialUSB.print(idx);
+        SerialUSB.println(" as the phrase.");
+        read_phrase(idx, phrase);
+    }
+
+private:
+    int32_t read_int(SdFile &f)
+    {
+        int32_t val = f.read();
+        val |= (int32_t)f.read() << 8;
+        val |= (int32_t)f.read() << 16;
+        val |= (int32_t)f.read() << 24;
+        return val;
+    }
+
+    void write_int(SdFile &f, int32_t val)
+    {
+        f.write(val & 0xFF);
+        f.write((val >> 8) & 0xFF);
+        f.write((val >> 16) & 0xFF);
+        f.write((val >> 24) & 0xFF);
+    }
+
+private:
+    uint32_t    _count;
+};
+
+Phrases phrases;
+
+void _draw_triangle(int x_offset=0, int y_offset=0, int linewidth=2, int margin=10, int color_r=0, int color_g=0, int color_b=0) 
+{
+    for(int lwidth = 1; lwidth < max(2, linewidth); ++lwidth)
+    {
+        int _x_offset = (lwidth * margin);
+        //int _y_offset = (lwidth * margin);
+        int min_x = _x_offset + x_offset;
+        int max_x = tft.width() - _x_offset + x_offset;
+        //int max_y = tft.height() - _y_offset;
+        //int min_y = _x_offset;
+        //int mid_x = tft.width()/ 2;
+        int mid_y = tft.height() / 2;
+        //int tenth_x = tft.width()/ 10;
+        int tenth_y = tft.height() / 10;
+        //tft.drawTriangle(
+        tft.fillTriangle(
+            max_x, mid_y + y_offset, 
+            min_x, tenth_y + y_offset, 
+            min_x, (9 * tenth_y) + y_offset, 
+            tft.Color565(color_r, color_g, color_b));
+        break;
+    }
+}
+
+void draw_triangle(int x_offset=0, int y_offset=0, int linewidth=3, int margin=30) 
+{
+    /*
+    if (x_offset == rb_x.peek_back() && y_offset == rb_y.peek_back())
+    {
+        return;
+    }
+    */
+    rb_x.push_back(x_offset);
+    rb_y.push_back(y_offset);
+    for(int idx = 0; idx < TRAILS; ++idx)
+    {
+        int blue = (int)((idx + 1.0) / (float)TRAILS * (float)0xff);
+        int mix = 0xff - blue;
+        _draw_triangle(rb_x.peek_front(idx), rb_y.peek_front(idx), linewidth, margin, mix, mix, blue);
+    }
+    //int _temp_x = rb_x.pop_front();
+    //int _temp_y = rb_y.pop_front();
+}
+
+class Timeout
+{
+public:
+    Timeout(uint32_t length=0) { set_timeout_millis(length); reset(); }
+    void set_timeout_millis(uint32_t length) { _timeout = length; reset(); }
+    void set_timeout_seconds(uint32_t length) { set_timeout_millis(length * 1000); reset(); }
+    void reset(uint32_t delta=0) { _alarm = _timeout + delta + millis(); }
+    bool expiration_check() { return (millis() > _alarm); }
+
+private:
+    uint32_t    _alarm;
+    uint32_t    _timeout;
+};
 
 class Accelerometer
 {
 public:
     Accelerometer(uint32_t bandwidth, uint32_t overlap=0, uint32_t retain=5) :
         stepcnt(0), samplecnt(0),
-        _bandwidth(bandwidth), _overlap(overlap), _sampled(false), _retain(retain)
+        _bandwidth(bandwidth), _overlap(overlap), _sampled(false), _retain(retain),
+        _bincnt(retain / 2 + 1)
     {
         for(int axis = 0; axis < AXIS_COUNT; ++axis)
         {
@@ -49,6 +315,7 @@ public:
         }
         // Create the configurations for FFT and iFFT...
         fftConfiguration = kiss_fftr_alloc(_retain, 0, NULL, NULL);
+        fftBins = new kiss_fft_cpx[_bincnt];
     }
 
     void step()
@@ -96,37 +363,80 @@ public:
         SerialUSB.println("");
     }
 
-    void fft()
+    void fft(int axis)
     {
-        // Allocate space for the FFT results (frequency bins)...
-        kiss_fft_cpx fftBins[_retain / 2 + 1];
         int16_t timeDomainData[_retain];
-        for(int axis = 0; axis < AXIS_COUNT; ++axis)
+        for(int idx = 0; idx < _retain; ++idx)
         {
-            for(int idx = 0; idx < _retain; ++idx)
-            {
-                timeDomainData[idx] = peek_sample(axis, idx);
-            }
-            kiss_fftr(fftConfiguration, const_cast<const int16_t*>(timeDomainData), fftBins);
-            for(int idx = 0; idx < _retain / 2 + 1; ++idx)
-            {
-                SerialUSB.print(idx);
-                SerialUSB.print(" [r:");
-                SerialUSB.print(fftBins[idx].r);
-                SerialUSB.print(" i:");
-                SerialUSB.print(fftBins[idx].i);
-                SerialUSB.print("] ");
-            }
-            SerialUSB.println("");
+            timeDomainData[idx] = peek_sample(axis, idx);
         }
-        kiss_fftr_free(fftConfiguration);
+        kiss_fftr(fftConfiguration, const_cast<const int16_t*>(timeDomainData), fftBins);
+    }
+
+    float getmag(kiss_fft_cpx *cpx, float scale=1024.0)
+    {
+        float _r = (float)cpx->r / scale;
+        float _i = (float)cpx->i / scale;
+        return _r * _r + _i * _i;
+    }
+
+    shake_rec *get_max_bin(int axis, shake_rec *rec = NULL, float threshold=0.01)
+    {
+        shake_rec max_rec = {0, 0, 0};
+        fft(axis);
+        for(int bin = 1; bin < _bincnt; ++bin)
+        {
+            float mag = getmag(fftBins + bin);
+            if (bin != 0 && bin < _bincnt - 1)
+                mag *= 2;
+            if (mag > threshold && mag > max_rec.mag)
+            {
+                max_rec.axis = axis;
+                max_rec.mag = mag;
+                max_rec.hz = bin;
+            }
+        }
+        if (max_rec.mag > threshold)
+        {
+            if (!rec)
+                rec = new shake_rec;
+            rec->axis = max_rec.axis;
+            rec->mag = max_rec.mag;
+            rec->hz = (float)max_rec.hz * ((float)SENSOR_SAMPLE_RATE / (float)_bandwidth) / (float)_retain;
+        }
+        return rec;
+    }
+
+    shake_rec *get_shake(shake_rec *rec=NULL, float mag_cutoff=0.01, float hz_cutoff=.1)
+    {
+        shake_rec _rec = {0, 0, 0};
+        shake_rec max_rec = {0, 0, 0};
+        for (int axis = 0; axis < AXIS_COUNT; ++axis)
+        {
+            get_max_bin(axis, &_rec);
+            if (_rec.mag > max_rec.mag)
+            {
+                max_rec.axis = axis;
+                max_rec.mag = _rec.mag;
+                max_rec.hz = _rec.hz;
+            }
+        }
+        if (max_rec.mag > mag_cutoff)
+        {
+            if (!rec)
+                rec = new shake_rec;
+            rec->axis = max_rec.axis;
+            rec->mag = max_rec.mag;
+            rec->hz = max_rec.hz;
+            return rec;
+        }
+        return NULL;
     }
 
     float g_scale(float val)
     {
-        //return max(-1.0, min(1.0, ((val - 2048.0) / 2048.0) * 3.0));
+        return max(-1.0, min(1.0, ((val - 2048.0) / 2048.0) * 3.0));
         //return ((val / 4096.0 * 6.0) - 3.0) / 3.0;
-        return val / 4096.0;
     }
 
     float roll(int8_t x, int8_t y, int8_t z)
@@ -159,6 +469,11 @@ public:
     }
 
 
+    float peek_g(int axis, int offset=0)
+    {
+        return g_scale(peek_sample(axis, offset));
+    }
+
     int16_t peek_sample(int axis, int offset=0)
     {
         return _samples[axis]->peek_front(offset);
@@ -190,36 +505,16 @@ private:
     volatile bool _sampled;
     int _retain;
     volatile int _step;
+    int _bincnt;
 
     float _vmap[AXIS_COUNT];
     OverwriteRingBuffer<int16_t>* _steps[AXIS_COUNT];
     OverwriteRingBuffer<int16_t>* _samples[AXIS_COUNT];
     kiss_fftr_cfg fftConfiguration;
+    kiss_fft_cpx *fftBins;
 };
 
-Accelerometer accel(10, 5, 20);
-
-class GestureModel
-{
-public:
-
-    void step()
-    {
-    }
-
-    void shake()
-    {
-    }
-
-private:
-};
-
-GestureModel gesture;
-
-void display_message(const char *msg) 
-{
-    tft.println(msg);
-}
+Accelerometer accel(4, 2, 256);
 
 void timer_callback()
 {
@@ -232,13 +527,25 @@ HardwareTimer sensor_timer(2);
 void setup() 
 {
     //while (!SerialUSB.available()) {};
+    pinMode(_SD_CS, OUTPUT);
+    spi.begin(SPI_18MHZ, MSBFIRST, 0);
+    tft.begin();
+    tft.setRotation(1);
+    //tft.fillScreen(tft.Color565(0xff, 0x0, 0x0));
+    //while (!SerialUSB.available()) {};
+    phrases.enable();
+    phrases.init();
+    phrases.disable();
     for(int axis = 0; axis < AXIS_COUNT; ++axis)
     {
         pinMode(AxisPins[axis], INPUT_ANALOG);
     }
     pinMode(BOARD_LED_PIN, OUTPUT);
+    // backlight
+    pinMode(_BL, OUTPUT);
+    digitalWrite(_BL, HIGH);
     // in microseconds; should give 1000Hz toggles
-    int _sensor_rate = 1000; 
+    int _sensor_rate = SENSOR_SAMPLE_RATE; 
     // Pause the timer while we're configuring it
     sensor_timer.pause();
     // Set up period
@@ -252,6 +559,7 @@ void setup()
     sensor_timer.refresh();
     // Start the timer counting
     sensor_timer.resume();
+    delay(250);
 }
 
 void capture(unsigned long count)
@@ -275,10 +583,13 @@ void capture(unsigned long count)
 
 void Prompt(void)
 {
+    char string_buffer[1024];
     static long v = 0;
     if (!SerialUSB.available()) return;
     char ch = SerialUSB.read();
-    SerialUSB.println(ch);
+    char *ptr;
+    size_t count, i;
+    //SerialUSB.println(ch);
 
     switch(ch) 
     {
@@ -302,14 +613,80 @@ void Prompt(void)
             accel.debug_dump();
             SerialUSB.println("");
             break;
+        case 'R':
+            phrases.enable();
+            phrases.reset();
+            phrases.disable();
+            SerialUSB.print("OK");
+            break;
+        case 'A':
+            ptr = string_buffer;
+            for (int idx=0; idx < v; ++idx)
+            {
+                *ptr++ = SerialUSB.read();
+            }
+            *ptr = (char)0;
+            //SerialUSB.print("This is what I got: ");
+            //SerialUSB.println(string_buffer);
+            phrases.enable();
+            phrases.write_phrase(string_buffer);
+            phrases.disable();
+            v = 0;
+            break;
+        case 'G':
+            phrases.enable();
+            phrases.get_random_phrase(string_buffer);
+            phrases.disable();
+            SerialUSB.println(string_buffer);
+            break;
         case 'c':
-            unsigned long count;
             count = SerialUSB.read();
             count |= (unsigned long)SerialUSB.read() << 8;
             count |= (unsigned long)SerialUSB.read() << 16;
             count |= (unsigned long)SerialUSB.read() << 24;
             capture(count);
             break;
+        case 'L':
+            count = SerialUSB.read();
+            count |= (size_t)SerialUSB.read() << 8;
+            count |= (size_t)SerialUSB.read() << 16;
+            count |= (size_t)SerialUSB.read() << 24;
+            /*
+            for(i = 0; i < count; ++i)
+            {
+                string_buffer[i] = SerialUSB.read();
+            }
+            */
+            SerialUSB.read(string_buffer, count);
+            string_buffer[count] = '\0';
+            SerialUSB.print("OK");
+            phrases.enable();
+            phrases.write_phrase(string_buffer);
+            phrases.disable();
+            break;
+        case 's':
+            while (1)
+            {
+                if (SerialUSB.available())
+                {
+                    SerialUSB.read();
+                    break;
+                }
+                shake_rec s_rec;
+                if (accel.get_shake(&s_rec))
+                {
+                    SerialUSB.print("shake: [");
+                    SerialUSB.print(AxisLabels[s_rec.axis]);
+                    SerialUSB.print("]: ");
+                    SerialUSB.print(s_rec.mag);
+                    SerialUSB.print(" @");
+                    SerialUSB.print(s_rec.hz);
+                    SerialUSB.print("Hz, ");
+                    SerialUSB.print(accel.g_scale(accel.peek_sample(s_rec.axis)));
+                    SerialUSB.print("G");
+                    SerialUSB.println("");
+                }
+            }
         case 'w':
             // watch
             while (1)
@@ -328,10 +705,6 @@ void Prompt(void)
                     SerialUSB.print(accel.peek_sample(axis));
                     SerialUSB.print(", ");
                     SerialUSB.print(accel.g_scale(accel.peek_sample(axis)));
-                    /*
-                    SerialUSB.print(", ");
-                    SerialUSB.print(analogRead(AxisPins[axis]));
-                    */
                     SerialUSB.print("] ");
                 }
                 SerialUSB.print(" roll: ");
@@ -339,8 +712,6 @@ void Prompt(void)
                 SerialUSB.print(" pitch: ");
                 SerialUSB.print(accel.pitch());
                 SerialUSB.println();
-                accel.fft();
-                delay(100);
             }
             break;
         case 'T':
@@ -349,33 +720,76 @@ void Prompt(void)
         default:
             SerialUSB.println("wat");
     }
+    /*
     SerialUSB.println("");
     SerialUSB.print("v=");
     SerialUSB.print(v);
     SerialUSB.print("> ");
+    */
+}
+
+void process_idle_event()
+{
+    digitalWrite(_BL, LOW);
+    tft.fillScreen(0x0000);
+}
+
+void process_unidle_event()
+{
+    digitalWrite(_BL, HIGH);
+}
+
+void display_message(const char *msg)
+{
+    tft.setTextColor(ILI9340_WHITE);
+    tft.setTextSize(3);
+    //tft.setCursor(tft.width() / 2, tft.height() / 2);
+    tft.setCursor(40, 0);
+    tft.println(msg);
+}
+
+void process_shake_event(shake_rec *s_rec=NULL)
+{
+    tft.fillScreen(tft.Color565(0x00, 0x0, 0x66));
+    char string_buffer[1024];
+    Timeout display_timeout(DISPLAY_TIMEOUT);
+    display_timeout.reset();
+
+    //tft.fillScreen(ILI9340_BLUE);
+    while(!display_timeout.expiration_check())
+    {
+        if(accel.get_shake(s_rec))
+        {
+            display_timeout.reset();
+        }
+    }
+    phrases.enable();
+    phrases.get_random_phrase(string_buffer);
+    phrases.disable();
+    display_message(string_buffer);
 }
 
 void loop()
 {
-    Prompt();
+    Timeout idle_timeout(IDLE_TIMEOUT);
+    shake_rec s_rec;
+    //tft.fillScreen(0xAAB0);
+
+    while (1)
+    {
+        if (accel.get_shake(&s_rec))
+        {
+            process_unidle_event();
+            process_shake_event(&s_rec);
+            idle_timeout.reset();
+        }
+        if (idle_timeout.expiration_check())
+        {
+            process_idle_event();
+        }
+        Prompt();
+    }
 }
-
-/***************************************************
-  This is an example sketch for the Adafruit 2.2" SPI display.
-  This library works with the Adafruit 2.2" TFT Breakout w/SD card
-  ----> http://www.adafruit.com/products/1480
- 
-  Check out the links above for our tutorials and wiring diagrams
-  These displays use SPI to communicate, 4 or 5 pins are required to
-  interface (RST is optional)
-  Adafruit invests time and resources providing this open source code,
-  please support Adafruit and open-source hardware by purchasing
-  products from Adafruit!
-
-  Written by Limor Fried/Ladyada for Adafruit Industries.
-  MIT license, all text above must be included in any redistribution
- ****************************************************/
- 
 
 unsigned long testFillScreen() {
   unsigned long start = micros();
@@ -387,300 +801,13 @@ unsigned long testFillScreen() {
   return micros() - start;
 }
 
-unsigned long testText() {
-  tft.fillScreen(ILI9340_BLACK);
-  unsigned long start = micros();
-  tft.setCursor(0, 0);
-  tft.setTextColor(ILI9340_WHITE);  tft.setTextSize(1);
-  tft.println("Hello World!");
-  tft.setTextColor(ILI9340_YELLOW); tft.setTextSize(2);
-  tft.println(1234.56);
-  tft.setTextColor(ILI9340_RED);    tft.setTextSize(3);
-  tft.println(0xDEADBEEF, HEX);
-  tft.println();
-  tft.setTextColor(ILI9340_GREEN);
-  tft.setTextSize(5);
-  tft.println("Groop");
-  tft.setTextSize(2);
-  tft.println("I implore thee,");
-  tft.setTextSize(1);
-  tft.println("my foonting turlingdromes.");
-  tft.println("And hooptiously drangle me");
-  tft.println("with crinkly bindlewurdles,");
-  tft.println("Or I will rend thee");
-  tft.println("in the gobberwarts");
-  tft.println("with my blurglecruncheon,");
-  tft.println("see if I don't!");
-  return micros() - start;
-}
-
-unsigned long testLines(uint16_t color) {
-  unsigned long start, t;
-  int           x1, y1, x2, y2,
-                w = tft.width(),
-                h = tft.height();
-
-  tft.fillScreen(ILI9340_BLACK);
-
-  x1 = y1 = 0;
-  y2    = h - 1;
-  start = micros();
-  for(x2=0; x2<w; x2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  x2    = w - 1;
-  for(y2=0; y2<h; y2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  t     = micros() - start; // fillScreen doesn't count against timing
-
-  tft.fillScreen(ILI9340_BLACK);
-
-  x1    = w - 1;
-  y1    = 0;
-  y2    = h - 1;
-  start = micros();
-  for(x2=0; x2<w; x2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  x2    = 0;
-  for(y2=0; y2<h; y2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  t    += micros() - start;
-
-  tft.fillScreen(ILI9340_BLACK);
-
-  x1    = 0;
-  y1    = h - 1;
-  y2    = 0;
-  start = micros();
-  for(x2=0; x2<w; x2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  x2    = w - 1;
-  for(y2=0; y2<h; y2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  t    += micros() - start;
-
-  tft.fillScreen(ILI9340_BLACK);
-
-  x1    = w - 1;
-  y1    = h - 1;
-  y2    = 0;
-  start = micros();
-  for(x2=0; x2<w; x2+=6) tft.drawLine(x1, y1, x2, y2, color);
-  x2    = 0;
-  for(y2=0; y2<h; y2+=6) tft.drawLine(x1, y1, x2, y2, color);
-
-  return micros() - start;
-}
-
-unsigned long testFastLines(uint16_t color1, uint16_t color2) {
-  unsigned long start;
-  int           x, y, w = tft.width(), h = tft.height();
-
-  tft.fillScreen(ILI9340_BLACK);
-  start = micros();
-  for(y=0; y<h; y+=5) tft.drawFastHLine(0, y, w, color1);
-  for(x=0; x<w; x+=5) tft.drawFastVLine(x, 0, h, color2);
-
-  return micros() - start;
-}
-
-unsigned long testRects(uint16_t color) {
-  unsigned long start;
-  int           n, i, i2,
-                cx = tft.width()  / 2,
-                cy = tft.height() / 2;
-
-  tft.fillScreen(ILI9340_BLACK);
-  n     = min(tft.width(), tft.height());
-  start = micros();
-  for(i=2; i<n; i+=6) {
-    i2 = i / 2;
-    tft.drawRect(cx-i2, cy-i2, i, i, color);
-  }
-
-  return micros() - start;
-}
-
-unsigned long testFilledRects(uint16_t color1, uint16_t color2) {
-  unsigned long start, t = 0;
-  int           n, i, i2,
-                cx = tft.width()  / 2 - 1,
-                cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9340_BLACK);
-  n = min(tft.width(), tft.height());
-  for(i=n; i>0; i-=6) {
-    i2    = i / 2;
-    start = micros();
-    tft.fillRect(cx-i2, cy-i2, i, i, color1);
-    t    += micros() - start;
-    // Outlines are not included in timing results
-    tft.drawRect(cx-i2, cy-i2, i, i, color2);
-  }
-
-  return t;
-}
-
-unsigned long testFilledCircles(uint8_t radius, uint16_t color) {
-  unsigned long start;
-  int x, y, w = tft.width(), h = tft.height(), r2 = radius * 2;
-
-  tft.fillScreen(ILI9340_BLACK);
-  start = micros();
-  for(x=radius; x<w; x+=r2) {
-    for(y=radius; y<h; y+=r2) {
-      tft.fillCircle(x, y, radius, color);
-    }
-  }
-
-  return micros() - start;
-}
-
-unsigned long testCircles(uint8_t radius, uint16_t color) {
-  unsigned long start;
-  int           x, y, r2 = radius * 2,
-                w = tft.width()  + radius,
-                h = tft.height() + radius;
-
-  // Screen is not cleared for this one -- this is
-  // intentional and does not affect the reported time.
-  start = micros();
-  for(x=0; x<w; x+=r2) {
-    for(y=0; y<h; y+=r2) {
-      tft.drawCircle(x, y, radius, color);
-    }
-  }
-
-  return micros() - start;
-}
-
-unsigned long testTriangles() {
-  unsigned long start;
-  int           n, i, cx = tft.width()  / 2 - 1,
-                      cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9340_BLACK);
-  n     = min(cx, cy);
-  start = micros();
-  for(i=0; i<n; i+=5) {
-    tft.drawTriangle(
-      cx    , cy - i, // peak
-      cx - i, cy + i, // bottom left
-      cx + i, cy + i, // bottom right
-      tft.Color565(0, 0, i));
-  }
-
-  return micros() - start;
-}
-
-unsigned long testFilledTriangles() {
-  unsigned long start, t = 0;
-  int           i, cx = tft.width()  / 2 - 1,
-                   cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9340_BLACK);
-  start = micros();
-  for(i=min(cx,cy); i>10; i-=5) {
-    start = micros();
-    tft.fillTriangle(cx, cy - i, cx - i, cy + i, cx + i, cy + i,
-      tft.Color565(0, i, i));
-    t += micros() - start;
-    tft.drawTriangle(cx, cy - i, cx - i, cy + i, cx + i, cy + i,
-      tft.Color565(i, i, 0));
-  }
-
-  return t;
-}
-
-unsigned long testRoundRects() {
-  unsigned long start;
-  int           w, i, i2,
-                cx = tft.width()  / 2 - 1,
-                cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9340_BLACK);
-  w     = min(tft.width(), tft.height());
-  start = micros();
-  for(i=0; i<w; i+=6) {
-    i2 = i / 2;
-    tft.drawRoundRect(cx-i2, cy-i2, i, i, i/8, tft.Color565(i, 0, 0));
-  }
-
-  return micros() - start;
-}
-
-unsigned long testFilledRoundRects() {
-  unsigned long start;
-  int           i, i2,
-                cx = tft.width()  / 2 - 1,
-                cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9340_BLACK);
-  start = micros();
-  for(i=min(tft.width(), tft.height()); i>20; i-=6) {
-    i2 = i / 2;
-    tft.fillRoundRect(cx-i2, cy-i2, i, i, i/8, tft.Color565(0, i, 0));
-  }
-
-  return micros() - start;
-}
-
-void display_test() {
-  SerialUSB.println("Adafruit 2.2\" SPI TFT Test!"); 
- 
-  tft.begin();
-
-  SerialUSB.println(("Benchmark                Time (microseconds)"));
-  SerialUSB.print(("Screen fill              "));
-  SerialUSB.println(testFillScreen());
-  delay(500);
-
-  SerialUSB.print(("Text                     "));
-  SerialUSB.println(testText());
-  delay(3000);
-
-  SerialUSB.print(("Lines                    "));
-  SerialUSB.println(testLines(ILI9340_CYAN));
-  delay(500);
-
-  SerialUSB.print(("Horiz/Vert Lines         "));
-  SerialUSB.println(testFastLines(ILI9340_RED, ILI9340_BLUE));
-  delay(500);
-
-  SerialUSB.print(("Rectangles (outline)     "));
-  SerialUSB.println(testRects(ILI9340_GREEN));
-  delay(500);
-
-  SerialUSB.print(("Rectangles (filled)      "));
-  SerialUSB.println(testFilledRects(ILI9340_YELLOW, ILI9340_MAGENTA));
-  delay(500);
-
-  SerialUSB.print(("Circles (filled)         "));
-  SerialUSB.println(testFilledCircles(10, ILI9340_MAGENTA));
-
-  SerialUSB.print(("Circles (outline)        "));
-  SerialUSB.println(testCircles(10, ILI9340_WHITE));
-  delay(500);
-
-  SerialUSB.print(("Triangles (outline)      "));
-  SerialUSB.println(testTriangles());
-  delay(500);
-
-  SerialUSB.print(("Triangles (filled)       "));
-  SerialUSB.println(testFilledTriangles());
-  delay(500);
-
-  SerialUSB.print(("Rounded rects (outline)  "));
-  SerialUSB.println(testRoundRects());
-  delay(500);
-
-  SerialUSB.print(("Rounded rects (filled)   "));
-  SerialUSB.println(testFilledRoundRects());
-  delay(500);
-
-  SerialUSB.println(("Done!"));
-}
-
 int main()
 {
     setup();
     while (1)
     {
         loop();
+        //Prompt();
     }
     return 0;
 }
-

@@ -14,7 +14,6 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 
 #include "_kiss_fft_guts.h"
-#include <wirish/wirish.h>
 /* The guts header contains all the multiplication and addition macros that are defined for
  fixed or floating point complex numbers.  It also delares the kf_ internal functions.
  */
@@ -408,20 +407,3 @@ int kiss_fft_next_fast_size(int n)
     return n;
 }
 
-void *KISS_FFT_MALLOC_DEBUG(size_t sz)
-{
-    SerialUSB.println(""); 
-    SerialUSB.print("malloc("); 
-    SerialUSB.print(sz); 
-    SerialUSB.println(")");
-    return malloc(sz); 
-}
-
-void KISS_FFT_FREE_DEBUG(void *thing)
-{
-    SerialUSB.println(""); 
-    SerialUSB.print("free("); 
-    SerialUSB.print((uint32_t)thing); 
-    SerialUSB.println(")");
-    free(thing); 
-}

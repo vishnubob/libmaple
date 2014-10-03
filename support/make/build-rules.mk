@@ -50,10 +50,10 @@ TOOLCHAIN_LDFLAGS := -L $(LD_TOOLCHAIN_PATH)
 
 # General directory independent build rules, generate dependency information
 $(BUILD_PATH)/%.o: %.c
-	$(SILENT_CC) $(CC) $(CFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<
+	mkdir -p `dirname $@`; $(CC) $(CFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<
 
 $(BUILD_PATH)/%.o: %.cpp
-	$(SILENT_CXX) $(CXX) $(CFLAGS) $(CXXFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<
+	mkdir -p `dirname $@`; $(CXX) $(CFLAGS) $(CXXFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<
 
 $(BUILD_PATH)/%.o: %.S
-	$(SILENT_AS) $(AS) $(ASFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<
+	mkdir -p `dirname $@`; $(AS) $(ASFLAGS) -MMD -MP -MF $(@:%.o=%.d) -MT $@ -o $@ -c $<

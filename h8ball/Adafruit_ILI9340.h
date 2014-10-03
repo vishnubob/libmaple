@@ -103,7 +103,7 @@
 class Adafruit_ILI9340 : public Adafruit_GFX {
 
  public:
-
+  Adafruit_ILI9340(uint8_t CS, uint8_t RS, uint8_t RST, HardwareSPI *spi);
   Adafruit_ILI9340(uint8_t CS, uint8_t RS, uint8_t RST, uint8_t SPI_PORT);
 
   void     begin(void),

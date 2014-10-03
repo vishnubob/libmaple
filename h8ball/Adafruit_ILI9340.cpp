@@ -27,6 +27,16 @@ Adafruit_ILI9340::Adafruit_ILI9340(uint8_t cs, uint8_t dc, uint8_t rst, uint8_t 
     _dc   = dc;
     _rst  = rst;
     _spi_port = spi_port;
+    _spi = NULL;
+}
+
+Adafruit_ILI9340::Adafruit_ILI9340(uint8_t cs, uint8_t dc, uint8_t rst, HardwareSPI *spi)
+    : Adafruit_GFX(ILI9340_TFTWIDTH, ILI9340_TFTHEIGHT) 
+{
+    _cs   = cs;
+    _dc   = dc;
+    _rst  = rst;
+    _spi = spi;
 }
 
 
@@ -71,8 +81,11 @@ void Adafruit_ILI9340::begin(void)
     pinMode(_dc, OUTPUT);
     pinMode(_cs, OUTPUT);
 
-    _spi = new HardwareSPI(_spi_port);
-    _spi->begin(SPI_18MHZ, MSBFIRST, 0);
+    if (_spi == NULL)
+    {
+        _spi = new HardwareSPI(_spi_port);
+        _spi->begin(SPI_18MHZ, MSBFIRST, 0);
+    }
 
     // toggle RST low to reset
     digitalWrite(_rst, HIGH);

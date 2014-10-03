@@ -24,17 +24,11 @@ extern "C" {
   in the tools/ directory.
 */
 
-#define DEBUG_MALLOC 1
-
 #ifdef USE_SIMD
 # include <xmmintrin.h>
 # define kiss_fft_scalar __m128
 #define KISS_FFT_MALLOC(nbytes) _mm_malloc(nbytes,16)
 #define KISS_FFT_FREE _mm_free
-#endif
-#ifdef DEBUG_MALLOC	
-#define KISS_FFT_MALLOC KISS_FFT_MALLOC_DEBUG
-#define KISS_FFT_FREE KISS_FFT_FREE_DEBUG
 #else
 #define KISS_FFT_MALLOC malloc
 #define KISS_FFT_FREE free
@@ -119,9 +113,6 @@ void kiss_fft_cleanup(void);
  */
 int kiss_fft_next_fast_size(int n);
 
-
-void *KISS_FFT_MALLOC_DEBUG(size_t sz);
-void KISS_FFT_FREE_DEBUG(void *thing);
 
 /* for real ffts, we need an even size */
 #define kiss_fftr_next_fast_size_real(n) \
